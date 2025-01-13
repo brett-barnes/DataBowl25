@@ -1,0 +1,199 @@
+---
+title: "MotionAnalysis289"
+format: pdf
+editor: visual
+---
+
+## Pre-Snap Motion as a Predictive Indicator for Play-Calling
+
+```{r}
+#| echo: false
+library(broom)
+library(tidyverse)
+library(ggrepel)
+theme_set(theme_minimal())
+player_plays <- read_csv("../data/nfl-big-data-bowl-2025/player_play.csv")
+players <- read_csv("../data/nfl-big-data-bowl-2025/players.csv")
+plays <- read_csv("../data/nfl-big-data-bowl-2025/plays.csv")
+```
+
+We can begin by constructing a series of dataframes that will allow us to make the calculations we desire. First, create a dataframe *motion_plays* which lists whether each play has motion or not.
+
+```{r}
+motion_plays <- player_plays |> 
+  mutate(motionSinceLineset = replace_na(motionSinceLineset, FALSE)) |> 
+  group_by(gameId, playId) |> 
+  summarize(play_motion = any(motionSinceLineset))
+```
+
+Next, count the number of running backs and tight ends, which allows me to identify the personnel.
+
+```{r}
+rb_plays <- player_plays |> 
+  left_join(players, by = "nflId") |> 
+  filter(position == "RB" | position == "FB") |> 
+  group_by(gameId, playId) |> 
+  summarize(rb_count = n())
+
+te_plays <- player_plays |> 
+  left_join(players, by = "nflId") |> 
+  filter(position == "TE") |> 
+  group_by(gameId, playId) |> 
+  summarize(te_count = n())
+  
+
+motion_plays <- motion_plays |> 
+  left_join(rb_plays, by = c("gameId", "playId")) |>
+  mutate(rb_count = replace_na(rb_count, 0)) |>
+  left_join(te_plays, by = c("gameId", "playId")) |>
+  mutate(te_count = replace_na(te_count, 0)) |>
+  mutate(personnel = paste0(rb_count, te_count)) |> 
+  select(gameId, playId, play_motion, personnel) 
+```
+
+Now, I can create the final dataframe *packages* which represents each combination of personnel and formation.
+
+```{r}
+pass_plays <- plays |> 
+  left_join(motion_plays, by = c("gameId", "playId")) |> 
+  filter(isDropback == TRUE) |> 
+  group_by(play_motion, personnel, offenseFormation) |> 
+  summarize(passAttempts = n()) 
+
+run_plays <- plays |> 
+  left_join(motion_plays, by = c("gameId", "playId")) |> 
+  filter(isDropback == FALSE) |> 
+  group_by(play_motion, personnel, offenseFormation) |> 
+  summarize(runAttempts = n())
+
+packages <- plays |> 
+    left_join(motion_plays, by = c("gameId", "playId")) |> 
+    group_by(play_motion, personnel, offenseFormation) |> 
+  summarize(totalAttempts = n())
+
+packages <- packages |> 
+  left_join(pass_plays, by = c("play_motion", "personnel",  "offenseFormation")) |>
+  left_join(run_plays, by = c("play_motion", "personnel", "offenseFormation")) |>
+    mutate(passAttempts = replace_na(passAttempts, 0)) |>
+    mutate(runAttempts = replace_na(runAttempts, 0)) |> 
+    mutate(offenseFormation = replace_na(offenseFormation, "OTHER")) |> 
+    mutate(passPercentage = passAttempts / totalAttempts) |> 
+    mutate(runPercentage = runAttempts / totalAttempts)
+```
+
+```{r}
+packages |> 
+  group_by(play_motion) |> 
+  summarize(totalAttempts = sum(totalAttempts), Pass = sum(passAttempts) / totalAttempts, Run = sum(runAttempts) / totalAttempts) |> 
+    pivot_longer(cols = c(Pass, Run), names_to = "playType", values_to = "percentage") |> 
+  ggplot() +
+  geom_col(aes(play_motion, percentage, fill = playType))+
+  scale_fill_viridis_d() +
+  labs(x = "Motion", y = "Percentage", fill = "Play Type") 
+```
+
+This chart shows us the percentage of plays that are passes vs runs by whether pre-snap motion was used on the play.
+
+```{r, fig.width=8, fig.height=6}
+packages |> 
+  select(personnel, totalAttempts, offenseFormation, passPercentage, runPercentage, play_motion) |>
+  group_by(personnel, offenseFormation) |> 
+  pivot_wider(names_from = play_motion, 
+              values_from = c(passPercentage, runPercentage, totalAttempts),   names_prefix = "motion_") |> 
+  ungroup() |> 
+  filter(is.na(passPercentage_motion_TRUE) == FALSE) |> 
+  filter(is.na(passPercentage_motion_FALSE) == FALSE) |> 
+  filter(is.na(runPercentage_motion_TRUE) == FALSE) |> 
+  filter(is.na(runPercentage_motion_FALSE) == FALSE) |> 
+  filter(totalAttempts_motion_FALSE >= 8) |> 
+  filter(totalAttempts_motion_TRUE >= 8) |>  
+  ggplot(aes(x = passPercentage_motion_TRUE, y = passPercentage_motion_FALSE)) +
+  geom_point(aes(color = personnel, shape = offenseFormation)) +
+  stat_function(fun = function(x) x, color = "black") +
+  scale_x_continuous(limits = c(0,1)) +
+  scale_y_continuous(limits = c(0,1)) +
+    scale_color_viridis_d() +
+  labs(x = "Pass % With Motion", y = "Pass % Without Motion", color = "Personnel Group", shape = "Formation")
+```
+
+This graph shows the same information, but in a different way- see how, with the sole exception of 10-personnel shotgun, motion correlates with passing. This isn't very surprising, nor is it helpful! What we want to see is if there are any personnel groups, formations, or combinations thereof which generate an even higher correlation, and potentially predictive relationship, with passing (and its inverse, running).
+
+```{r}
+packages |> 
+  select(personnel, totalAttempts, offenseFormation, passPercentage, runPercentage, play_motion) |>
+  group_by(personnel, offenseFormation) |> 
+  pivot_wider(names_from = play_motion, 
+              values_from = c(passPercentage, runPercentage, totalAttempts),   names_prefix = "motion_") |> 
+  ungroup() |> 
+  filter(is.na(passPercentage_motion_TRUE) == FALSE) |> 
+  filter(is.na(passPercentage_motion_FALSE) == FALSE) |> 
+  filter(is.na(runPercentage_motion_TRUE) == FALSE) |> 
+  filter(is.na(runPercentage_motion_FALSE) == FALSE) |> 
+  filter(totalAttempts_motion_FALSE >= 8) |> 
+  filter(totalAttempts_motion_TRUE >= 8) |>  
+  ggplot(aes(x = passPercentage_motion_TRUE, y = passPercentage_motion_FALSE)) +
+  geom_point(aes(color = personnel)) +
+  stat_function(fun = function(x) x, color = "black") +
+  scale_x_continuous(limits = c(0,1)) +
+  scale_y_continuous(limits = c(0,1)) +
+  facet_wrap(~ offenseFormation) +   
+  scale_color_viridis_d() +
+  labs(x = "Pass % With Motion", y = "Pass % Without Motion", color = "Personnel Group")
+```
+
+From this data, we can see that empty formation (unsurprisingly) will almost always result in a pass, regardless of whether motion is used or not, while 2-RB Pistol packages are significantly more likely to result in a pass if motion is used.
+
+```{r}
+packages |> 
+  select(personnel, totalAttempts, offenseFormation, passPercentage, runPercentage, play_motion) |>
+  group_by(personnel, offenseFormation) |> 
+  pivot_wider(names_from = play_motion, 
+              values_from = c(passPercentage, runPercentage, totalAttempts),   names_prefix = "motion_") |> 
+  ungroup() |> 
+  filter(is.na(passPercentage_motion_TRUE) == FALSE) |> 
+  filter(is.na(passPercentage_motion_FALSE) == FALSE) |> 
+  filter(is.na(runPercentage_motion_TRUE) == FALSE) |> 
+  filter(is.na(runPercentage_motion_FALSE) == FALSE) |> 
+  filter(totalAttempts_motion_FALSE >= 8) |> 
+  filter(totalAttempts_motion_TRUE >= 8) |> 
+  mutate(pass_ratio = passPercentage_motion_TRUE / passPercentage_motion_FALSE) |>
+  mutate(totalAttempts = totalAttempts_motion_FALSE + totalAttempts_motion_TRUE) |>
+  mutate(frequent = if_else(totalAttempts >= 128, TRUE, FALSE)) |> 
+  select(personnel, offenseFormation, pass_ratio, frequent) |> 
+  mutate(pe_fo = paste(personnel, offenseFormation, sep = " ")) |> 
+  # arrange(-pass_ratio) |> 
+  # mutate(personnel = fct_inorder(personnel)) |> 
+  ggplot() +
+  geom_col(aes(x = pass_ratio, y = reorder(pe_fo, pass_ratio), fill = offenseFormation, alpha = as.factor(frequent))) +
+  scale_alpha_manual(values = c(0.25, 1)) +
+  scale_fill_viridis_d() +
+  labs(x = "Pass % With / Pass % Without Motion Ratio", y = "Personnel & Formation", fill = "Formation", alpha = "Frequently Ran") 
+```
+
+This chart shows the ratio of pass percentage with motion to pass percentage without motion. The fill aesthetic is used to help visually cue the relationships- such as Empty and Shotgun formations having approximately as many passes with and without motion, or I Form, Pistol, and Jumbo being \~2-7x more likely to have a pass if pre-snap motion is used, depending on the personnel. We can also see correlations within the personnel groupings, such as 0-RB or 0-TE packages having ratios around one implying that motion does not significantly impact the likelihood of a pass play being ran. The alpha aesthetic indicates whether or not a package is frequently utilized (approximately at least once per game), allowing us to focus on the packages that we are most likely to actually see (e.g. 13 personnel I Form was only utilized 50 times across the 9 weeks / 144 games our dataset includes, and thus is less critical); however, they still are important to have on the chart, as they are seen enough to still be wary of.
+
+Extra graph with linear models (clutters it visually but does provide some more information):
+
+```{r}
+packages |> 
+  select(personnel, totalAttempts, offenseFormation, passPercentage, runPercentage, play_motion) |>
+  group_by(personnel, offenseFormation) |> 
+  pivot_wider(names_from = play_motion, 
+              values_from = c(passPercentage, runPercentage, totalAttempts),   names_prefix = "motion_") |> 
+  ungroup() |> 
+  filter(is.na(passPercentage_motion_TRUE) == FALSE) |> 
+  filter(is.na(passPercentage_motion_FALSE) == FALSE) |> 
+  filter(is.na(runPercentage_motion_TRUE) == FALSE) |> 
+  filter(is.na(runPercentage_motion_FALSE) == FALSE) |> 
+  filter(totalAttempts_motion_FALSE >= 8) |> 
+  filter(totalAttempts_motion_TRUE >= 8) |>  
+  ggplot(aes(x = passPercentage_motion_TRUE, y = passPercentage_motion_FALSE)) +
+  geom_point(aes(color = personnel)) +
+  geom_smooth(method = "lm") +
+  stat_function(fun = function(x) x, color = "black") +
+  scale_x_continuous(limits = c(0,1)) +
+  scale_y_continuous(limits = c(0,1)) +
+  facet_wrap(~ offenseFormation) +   
+  scale_color_viridis_d() +
+  labs(x = "Pass % With Motion", y = "Pass % Without Motion", color = "Personnel Group")
+```
